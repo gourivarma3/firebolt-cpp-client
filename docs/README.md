@@ -61,7 +61,7 @@ The library is designed around a single abstract interface (`IFireboltAccessor`)
 
 On the northbound side, the library presents pure abstract C++ interfaces defined in `include/firebolt/`. Applications link against these headers and the shared library, and obtain interface references via the `IFireboltAccessor` — the concrete implementation type remains internal. On the southbound side, all communication flows through the `FireboltTransport` package, which manages the WebSocket lifecycle and multiplexes JSON-RPC requests and event subscriptions.
 
-Each domain that supports events maintains a per-domain subscription registry, mapping a `SubscriptionId` to the caller-supplied `std::function` callback. When the platform fires an event, the transport delivers the payload to the registered handler, which deserializes it and invokes the callback. The `FireboltAccessorImpl` destructor calls `unsubscribeAll()` across every domain that supports subscriptions, releasing all active handlers when the connection is torn down.
+Each domain that supports events maintains a per-domain subscription registry, mapping a `SubscriptionId` to the caller-supplied `std::function` callback. When the platform fires an event, the transport delivers the payload to the registered handler, which deserializes it and invokes the callback. The `FireboltAccessorImpl` destructor calls `unsubscribeAll()` across every domain that supports subscriptions, releasing all active handlers during accessor teardown. The destructor does not disconnect the transport; explicit `Disconnect()` performs both operations.
 
 All state is session-scoped and tied to the lifetime of the active WebSocket connection. Connection configuration (endpoint URL, log level, protocol selection) is supplied by the caller through the `Firebolt::Config` parameter passed to `Connect()`.
 
@@ -73,7 +73,7 @@ subgraph ClientBoundary["firebolt-cpp-client (Shared Library)"]
     ACC["FireboltAccessorImpl — Connect / Disconnect / unsubscribeAll"]
 
     subgraph SubDomains["Subscription-capable Domains"]
-        SD["AccessibilityImpl · ActionsImpl · DeviceImpl · LifecycleImpl · LocalizationImpl · NetworkImpl · PresentationImpl · TextToSpeechImpl"]
+        SD["AccessibilityImpl · ActionsImpl · DeviceImpl · LifecycleImpl · LocalizationImpl · NetworkImpl · PresentationImpl · SpeechSynthesisImpl · TextToSpeechImpl · VideoOutputImpl"]
     end
 
     subgraph ReqDomains["Request-Response Domains"]
@@ -113,7 +113,7 @@ SM -->|"event dispatch"| GW
 
 - **Build Dependencies**: `firebolt-cpp-transport` (installed separately; major version pinned via `.transport.version`), `nlohmann_json`, CMake ≥ 3.12, C++17-capable compiler.
 - **Runtime Dependencies**: `firebolt-cpp-transport` shared library must be present on the target device (`RDEPENDS:${PN}` in the Yocto recipe).
-- **Transport Version Pinning**: The major version of the installed `FireboltTransport` package must match the version recorded in `.transport.version`. This check is performed at CMake configure time; a mismatch causes a configuration error unless `BUILD_WITH_INSTALLED_TRANSPORT=ON` is set.
+- **Transport Version Pinning**: CMake extracts the major version from `.transport.version` and requests a matching installed `FireboltTransport` package at configure time (`find_package(FireboltTransport <major> CONFIG REQUIRED)`). `BUILD_WITH_INSTALLED_TRANSPORT` is currently declared but unused and does not bypass this requirement.
 - **Startup Order**: The host application calls `Connect()` and waits for the `OnConnectionChanged` callback before invoking any API methods. All connection parameters are supplied programmatically via the `Firebolt::Config` struct.
 
 ---
@@ -213,7 +213,7 @@ sequenceDiagram
 | `AccessibilityImpl`    | Implements `IAccessibility`. Exposes audio description, closed-caption settings, high-contrast UI, and voice-guidance settings, with subscription support for each property.                                                                                                                                                                                                        | `src/accessibility_impl.cpp`, `src/accessibility_impl.h` |
 | `ActionsImpl`          | Implements `IActions`. Provides `intent()` to retrieve the current app intent, `subscribeOnIntent()` for live intent change notifications, and `start()` to dispatch a new intent to a handler app. Auto-generated from the OpenRPC spec.                                                                                                                                           | `src/actions_impl.cpp`, `src/actions_impl.h`             |
 | `AdvertisingImpl`      | Implements `IAdvertising`. Provides `advertisingId()` returning an `Ifa` struct containing the advertising identifier, type, and limit-ad-tracking flag.                                                                                                                                                                                                                            | `src/advertising_impl.cpp`, `src/advertising_impl.h`     |
-| `DeviceImpl`           | Implements `IDevice`. Provides chipset ID, device class (STB/OTT/TV), HDR format capabilities, uptime, UID, active-state time, and Dolby Atmos experience availability, with subscriptions for HDR and Dolby Atmos changes.                                                                                                                                                         | `src/device_impl.cpp`, `src/device_impl.h`               |
+| `DeviceImpl`           | Implements `IDevice`. Provides chipset ID, device class (STB/OTT/TV), OS name and version getters/setters, firmware, HDR format capabilities, active-state time, UID, uptime, Dolby Atmos experience availability, and device name, with subscriptions for HDR, Dolby Atmos, and name changes.                                                                                                                                                         | `src/device_impl.cpp`, `src/device_impl.h`               |
 | `DiscoveryImpl`        | Implements `IDiscovery`. Reports watched content events to the platform via `watched()` (returns `Result<bool>` for backward compatibility) and `watchedV2()` (returns `Result<void>`).                                                                                                                                                                                             | `src/discovery_impl.cpp`, `src/discovery_impl.h`         |
 | `DisplayImpl`          | Implements `IDisplay`. Returns EDID data as a Base64 string, native display resolution (`maxResolution()`), and physical display dimensions (`size()`).                                                                                                                                                                                                                             | `src/display_impl.cpp`, `src/display_impl.h`             |
 | `LifecycleImpl`        | Implements `ILifecycle`. Manages app lifecycle state queries (`state()`) and transition subscriptions (`subscribeOnStateChanged()`). Dispatches `Lifecycle2.close` with the requested close type.                                                                                                                                                                                   | `src/lifecycle_impl.cpp`, `src/lifecycle_impl.h`         |
@@ -221,9 +221,11 @@ sequenceDiagram
 | `MetricsImpl`          | Implements `IMetrics`. Reports telemetry events to the platform: `ready()`, `signIn()`, `signOut()`, `startContent()`, `stopContent()`, `page()`, `error()`, `mediaLoadStart()`, `mediaPlay()`, `mediaPlaying()`, `mediaPause()`, `mediaWaiting()`, `mediaSeeking()`, `mediaSeeked()`, `mediaRateChanged()`, `mediaRenditionChanged()`, `mediaEnded()`, `event()`, and `appInfo()`. | `src/metrics_impl.cpp`, `src/metrics_impl.h`             |
 | `NetworkImpl`          | Implements `INetwork`. Queries current network connectivity (`connected()`) and subscribes to connectivity change events.                                                                                                                                                                                                                                                           | `src/network_impl.cpp`, `src/network_impl.h`             |
 | `PresentationImpl`     | Implements `IPresentation`. Queries whether the application is currently focused (receiving key presses) and subscribes to focus change events.                                                                                                                                                                                                                                     | `src/presentation_impl.cpp`, `src/presentation_impl.h`   |
+| `SpeechSynthesisImpl`  | Implements `ISpeechSynthesis`. Provides `speak()`, `voices()`, `cancel()`, `pause()`, and `resume()` for utterances, with subscriptions for voice list changes (`subscribeOnVoicesChanged()`) and utterance events (`subscribeOnUtteranceEvent()`).                                                                                                                                             | `src/speechsynthesis_impl.cpp`, `src/speechsynthesis_impl.h` |
 | `StatsImpl`            | Implements `IStats`. Returns container memory statistics including user memory and GPU memory usage and limits via `memoryUsage()`.                                                                                                                                                                                                                                                 | `src/stats_impl.cpp`, `src/stats_impl.h`                 |
 | `TextToSpeechImpl`     | Implements `ITextToSpeech`. Provides TTS control: `listVoices()`, `speak()`, `pause()`, `resume()`, `cancel()`, `getSpeechState()`, and event subscriptions for speech lifecycle (willSpeak, speechStart, speechPause, speechResume, speechComplete, speechInterrupted, networkError, playbackError).                                                                               | `src/texttospeech_impl.cpp`, `src/texttospeech_impl.h`   |
-| JSON type adapters     | Per-domain structs under `json_types/` that bridge `nlohmann::json` deserialization to typed C++ domain structs. Each domain has a corresponding header (e.g., `json_types/device.h`, `json_types/lifecycle.h`).                                                                                                                                                                    | `src/json_types/*.h`                                     |
+| `VideoOutputImpl`      | Implements `IVideoOutput`. Provides resolution, refresh rate, HDCP state, CEC state, color depth, color format, colorimetry, dynamic range, and quantization range queries, with subscriptions for resolution, HDCP, CEC state, and refresh rate changes.                                                                                                                                 | `src/videooutput_impl.cpp`, `src/videooutput_impl.h`     |
+| JSON type adapters     | Domain-specific structs under `json_types/` bridge `nlohmann::json` deserialization to typed C++ domain structs where custom conversion is required (e.g., `json_types/device.h`, `json_types/lifecycle.h`); domains using scalar or collection types rely on generic transport JSON helpers instead.                                                                                                                                                                    | `src/json_types/*.h`                                     |
 
 ---
 
@@ -246,6 +248,13 @@ The subscription model delivers platform event notifications to the application 
 | ------------------------------- | ----------------------------------------------- | ------------------------------------------------------ | ---------------- |
 | HDR format change               | `Device.onHdrChanged`                           | Display HDR capabilities change                        | `IDevice`        |
 | Dolby Atmos availability        | `Device.onDolbyAtmosExperienceAvailableChanged` | Platform reports change in Dolby Atmos availability    | `IDevice`        |
+| Device name change              | `Device.onNameChanged`                          | Device name changes                                    | `IDevice`        |
+| Speech voices change            | `SpeechSynthesis.onVoicesChanged`               | Voice list notification from the speech synthesis service | `ISpeechSynthesis` |
+| Utterance event                 | `SpeechSynthesis.onUtteranceEvent`              | Utterance event notification from the speech synthesis service | `ISpeechSynthesis` |
+| Video resolution change         | `VideoOutput.onResolutionChanged`               | Output resolution changes                              | `IVideoOutput`   |
+| HDCP state change               | `VideoOutput.onHdcpChanged`                     | HDCP state changes                                     | `IVideoOutput`   |
+| CEC state change                | `VideoOutput.onCecStateChanged`                 | CEC state changes                                      | `IVideoOutput`   |
+| Refresh rate change             | `VideoOutput.onRefreshRateChanged`              | Refresh rate changes                                   | `IVideoOutput`   |
 | Lifecycle state change          | `Lifecycle2.onStateChanged`                     | Platform transitions the app between lifecycle states  | `ILifecycle`     |
 | Audio description change        | `Accessibility.onAudioDescriptionChanged`       | User changes audio description setting                 | `IAccessibility` |
 | Closed-caption settings change  | `Accessibility.onClosedCaptionsSettingsChanged` | User changes caption preferences                       | `IAccessibility` |
@@ -258,14 +267,14 @@ The subscription model delivers platform event notifications to the application 
 | Presentation language change    | `Localization.onPresentationLanguageChanged`    | UI presentation language changes                       | `ILocalization`  |
 | Timezone change                 | `Localization.onTimeZoneChanged`                | Device timezone setting changes                        | `ILocalization`  |
 | Intent received                 | `Actions.onIntent`                              | Platform dispatches a new navigation intent to the app | `IActions`       |
-| TTS will speak                  | `TextToSpeech.onWillspeak`                      | TTS engine is about to begin synthesizing speech       | `ITextToSpeech`  |
-| TTS speech start                | `TextToSpeech.onSpeechstart`                    | TTS audio playback starts                              | `ITextToSpeech`  |
-| TTS speech pause                | `TextToSpeech.onSpeechpause`                    | TTS audio playback is paused                           | `ITextToSpeech`  |
-| TTS speech resume               | `TextToSpeech.onSpeechresume`                   | TTS audio playback resumes                             | `ITextToSpeech`  |
-| TTS speech complete             | `TextToSpeech.onSpeechcomplete`                 | TTS utterance finishes successfully                    | `ITextToSpeech`  |
-| TTS speech interrupted          | `TextToSpeech.onSpeechinterrupted`              | TTS utterance is interrupted                           | `ITextToSpeech`  |
-| TTS network error               | `TextToSpeech.onNetworkerror`                   | TTS encounters a network error during synthesis        | `ITextToSpeech`  |
-| TTS playback error              | `TextToSpeech.onPlaybackerror`                  | TTS encounters a playback error during output          | `ITextToSpeech`  |
+| TTS will speak                  | `TextToSpeech.onWillSpeak`                      | TTS engine is about to begin synthesizing speech       | `ITextToSpeech`  |
+| TTS speech start                | `TextToSpeech.onSpeechStart`                    | TTS audio playback starts                              | `ITextToSpeech`  |
+| TTS speech pause                | `TextToSpeech.onSpeechPause`                    | TTS audio playback is paused                           | `ITextToSpeech`  |
+| TTS speech resume               | `TextToSpeech.onSpeechResume`                   | TTS audio playback resumes                             | `ITextToSpeech`  |
+| TTS speech complete             | `TextToSpeech.onSpeechComplete`                 | TTS utterance finishes successfully                    | `ITextToSpeech`  |
+| TTS speech interrupted          | `TextToSpeech.onSpeechInterrupted`              | TTS utterance is interrupted                           | `ITextToSpeech`  |
+| TTS network error               | `TextToSpeech.onNetworkError`                   | TTS encounters a network error during synthesis        | `ITextToSpeech`  |
+| TTS playback error              | `TextToSpeech.onPlaybackError`                  | TTS encounters a playback error during output          | `ITextToSpeech`  |
 
 ### IPC Flow Patterns
 
@@ -306,14 +315,14 @@ sequenceDiagram
 
 ### Key Implementation Logic
 
-- **State / Lifecycle Management**: The `FireboltAccessorImpl` destructor releases all active subscriptions before delegating disconnect to the transport.
+- **State / Lifecycle Management**: `FireboltAccessorImpl::Disconnect()` releases all active subscriptions before delegating disconnect to the transport; the destructor also releases subscriptions during accessor teardown.
   - Connection management: `src/firebolt.cpp`
 
 - **Event Processing**: Each subscription-capable domain registers event topic handlers with the transport on `subscribe*()` calls. When an event arrives, the payload is deserialized via the domain-specific JSON type adapter and delivered to the registered callback.
 
 - **JSON Serialization Strategy**: Request parameters are serialized per domain in `*_impl.cpp` files. Optional parameters are included only when their `std::optional` value is present. Response deserialization relies on templated JSON adapter structs in `src/json_types/`.
 
-- **Error Handling Strategy**: All API methods return a `Result<T>` type. Callers check the result for success or error before accessing the value.
+- **Error Handling Strategy**: Domain request/response and subscription operations return a `Result<T>` type, which callers check before accessing a value. `Connect()` and `Disconnect()` return `Firebolt::Error`, while `unsubscribeAll()` returns `void`.
 
 - **Logging & Diagnostics**: The client library version string is logged at connection time. Verbosity is controlled by the `LogLevel` parameter in `Firebolt::Config`.
 
@@ -345,8 +354,8 @@ The following CMake options govern the build behavior of the library. The values
 | -------------------------------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `BUILD_SHARED_LIBS`              | `ON`    | Build the library as a shared object (`.so`). Set to `OFF` to produce a static archive.                                                                                                                          |
 | `DISABLE_SO_VERSION`             | `OFF`   | When `ON`, suppresses the SONAME and SOVERSION from the shared library. Exposed in the Yocto recipe as `PACKAGECONFIG[disable-so-version]`.                                                                      |
-| `BUILD_WITH_INSTALLED_TRANSPORT` | `ON`    | Allow building against the installed `FireboltTransport` even if its version does not match the pinned version in `.transport.version`.                                                                          |
+| `BUILD_WITH_INSTALLED_TRANSPORT` | `ON`    | Declared but currently unused: no CMake logic reads it, and the versioned `FireboltTransport` lookup in `CMakeLists.txt` runs unconditionally.                                                                          |
 | `ENABLE_TESTS`                   | `OFF`   | Builds unit and component test targets. When `ON`, symbol visibility is set to `default` (rather than `hidden`) and coverage instrumentation flags (`--coverage -g -O0 -fno-inline`) are applied to the library. |
 | `ENABLE_DEMO_APP`                | `OFF`   | Builds the `api-test-app` CLI demo utility located in `test/api_test_app/`.                                                                                                                                      |
-| `DISCOVER_UT`                    | `ON`    | Enables automatic discovery of all unit test cases at CMake configure time.                                                                                                                                      |
-| `DISCOVER_CT`                    | `OFF`   | Enables automatic discovery of all component test cases at CMake configure time.                                                                                                                                 |
+| `DISCOVER_UT`                    | `ON`    | Enables automatic discovery of unit test cases immediately before test execution (`DISCOVERY_MODE PRE_TEST`); requires `ENABLE_TESTS=ON`.                                                                                                                                      |
+| `DISCOVER_CT`                    | `OFF`   | Enables automatic discovery of component test cases immediately before test execution (`DISCOVERY_MODE PRE_TEST`); requires `ENABLE_TESTS=ON`.                                                                                                                                 |
