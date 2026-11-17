@@ -61,7 +61,7 @@ The library is designed around a single abstract interface (`IFireboltAccessor`)
 
 On the northbound side, the library presents pure abstract C++ interfaces defined in `include/firebolt/`. Applications link against these headers and the shared library, and obtain interface references via the `IFireboltAccessor` — the concrete implementation type remains internal. On the southbound side, all communication flows through the `FireboltTransport` package, which manages the WebSocket lifecycle and multiplexes JSON-RPC requests and event subscriptions.
 
-Each domain that supports events maintains a per-domain subscription registry, mapping a `SubscriptionId` to the caller-supplied `std::function` callback. When the platform fires an event, the transport delivers the payload to the registered handler, which deserializes it and invokes the callback. The `FireboltAccessorImpl` destructor calls `unsubscribeAll()` across every domain that supports subscriptions, releasing all active handlers during accessor teardown. The destructor does not disconnect the transport; explicit `Disconnect()` performs both operations.
+Each domain that supports events maintains a per-domain subscription registry, mapping a `SubscriptionId` to the caller-supplied `std::function` callback. When the platform fires an event, the transport delivers the payload to the registered handler, which deserializes it and invokes the callback. The `FireboltAccessorImpl` destructor clears the resume listener, disconnects the transport, and then calls `unsubscribeAll()` across every domain that supports subscriptions. Explicit `Disconnect()` clears the resume listener and releases subscriptions before disconnecting the transport.
 
 All state is session-scoped and tied to the lifetime of the active WebSocket connection. Connection configuration (endpoint URL, log level, protocol selection) is supplied by the caller through the `Firebolt::Config` parameter passed to `Connect()`.
 
@@ -111,9 +111,9 @@ SM -->|"event dispatch"| GW
 
 #### Platform and Integration Requirements
 
-- **Build Dependencies**: `firebolt-cpp-transport` (installed separately; major version pinned via `.transport.version`), `nlohmann_json`, CMake ≥ 3.12, C++17-capable compiler.
+- **Build Dependencies**: `firebolt-cpp-transport` (installed separately; minimum version specified by `.transport.version`, subject to the explicit-root override below), `nlohmann_json`, CMake ≥ 3.12, C++17-capable compiler.
 - **Runtime Dependencies**: `firebolt-cpp-transport` shared library must be present on the target device (`RDEPENDS:${PN}` in the Yocto recipe).
-- **Transport Version Pinning**: CMake extracts the major version from `.transport.version` and requests a matching installed `FireboltTransport` package at configure time (`find_package(FireboltTransport <major> CONFIG REQUIRED)`). `BUILD_WITH_INSTALLED_TRANSPORT` is currently declared but unused and does not bypass this requirement.
+- **Transport Version Selection**: CMake reads the full version from `.transport.version` and normally requests it as the minimum installed `FireboltTransport` version. When `BUILD_WITH_INSTALLED_TRANSPORT=ON` and either `FIREBOLT_TRANSPORT_ROOT` or `FireboltTransport_ROOT` is supplied, CMake uses an unversioned package lookup and warns rather than failing if the installed version is below the specified minimum.
 - **Startup Order**: The host application calls `Connect()` and waits for the `OnConnectionChanged` callback before invoking any API methods. All connection parameters are supplied programmatically via the `Firebolt::Config` struct.
 
 ---
@@ -354,7 +354,7 @@ The following CMake options govern the build behavior of the library. The values
 | -------------------------------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `BUILD_SHARED_LIBS`              | `ON`    | Build the library as a shared object (`.so`). Set to `OFF` to produce a static archive.                                                                                                                          |
 | `DISABLE_SO_VERSION`             | `OFF`   | When `ON`, suppresses the SONAME and SOVERSION from the shared library. Exposed in the Yocto recipe as `PACKAGECONFIG[disable-so-version]`.                                                                      |
-| `BUILD_WITH_INSTALLED_TRANSPORT` | `ON`    | Declared but currently unused: no CMake logic reads it, and the versioned `FireboltTransport` lookup in `CMakeLists.txt` runs unconditionally.                                                                          |
+| `BUILD_WITH_INSTALLED_TRANSPORT` | `OFF` (or `ON` with an explicit transport root) | With `FIREBOLT_TRANSPORT_ROOT` or `FireboltTransport_ROOT` supplied, allows an installed transport version below `.transport.version`, issuing a warning instead of enforcing the minimum. Ignored without an explicit root.                                                                          |
 | `ENABLE_TESTS`                   | `OFF`   | Builds unit and component test targets. When `ON`, symbol visibility is set to `default` (rather than `hidden`) and coverage instrumentation flags (`--coverage -g -O0 -fno-inline`) are applied to the library. |
 | `ENABLE_DEMO_APP`                | `OFF`   | Builds the `api-test-app` CLI demo utility located in `test/api_test_app/`.                                                                                                                                      |
 | `DISCOVER_UT`                    | `ON`    | Enables automatic discovery of unit test cases immediately before test execution (`DISCOVERY_MODE PRE_TEST`); requires `ENABLE_TESTS=ON`.                                                                                                                                      |
